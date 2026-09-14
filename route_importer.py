@@ -243,12 +243,12 @@ class Writer:
         self.batch = db.batch()
         self.count = 0
 
-    def set(self, reference, data):
+    def set(self, reference, data, merge=False):
         if self.count >= 400:
             self.batch.commit()
             self.batch = self.db.batch()
             self.count = 0
-        self.batch.set(reference, data)
+        self.batch.set(reference, data, merge=merge)
         self.count += 1
 
     def finish(self):
@@ -268,57 +268,85 @@ def publish(db, routes, source_name, source_hash, loading_time):
             helper_id, helper = find_user(index, route["helper"], "Ajudante", route["route_name"])
         date_id = route["date"].isoformat()
         reference = db.collection("routes").document(f"{date_id}_{slug(route['route_name'])}")
-        if reference.get().exists:
-            raise ValueError(f"A rota {route['route_name']} de {date_id} já existe. Ela não foi sobrescrita.")
-        prepared.append((route, reference, driver_id, driver, helper_id, helper, checker_id, checker))
+        exists = reference.get().exists
+        prepared.append((route, reference, exists, driver_id, driver, helper_id, helper, checker_id, checker))
 
     writer = Writer(db)
-    for route, reference, driver_id, driver, helper_id, helper, checker_id, checker in prepared:
+    created_routes = 0
+    updated_routes = 0
+    updated_invoices = 0
+    for route, reference, exists, driver_id, driver, helper_id, helper, checker_id, checker in prepared:
         route_day = route["date"]
         members = [driver_id, checker_id] + ([helper_id] if helper_id else [])
         planned_total = sum(sum(stop["boxes"].values()) for stop in route["stops"])
-        writer.set(reference, {
-            "date": route_day.isoformat(),
-            "routeName": route["route_name"],
-            "loadingAt": loading_time,
-            "driverId": driver_id,
-            "driverName": driver.get("name", route["driver"]),
-            "helperId": helper_id,
-            "helperName": helper.get("name", "Não informado") if helper_id else "Não informado",
-            "checkerId": checker_id,
-            "checkerName": checker.get("name", route["checker"]),
-            "memberIds": members,
-            "plannedTotal": planned_total,
-            "sourceFile": source_name,
-            "sourceFileHash": source_hash,
-            "importMethod": "google-drive-automatic",
-            "publishedBy": "automatic-import",
-            "publishedAt": firestore.SERVER_TIMESTAMP,
-            "detailsExpireAt": datetime.combine(route_day + timedelta(days=180), time(), tzinfo=timezone.utc),
-            "routeExpiresAt": datetime.combine(route_day + timedelta(days=365), time(), tzinfo=timezone.utc),
-        })
+        missing_invoice_count = sum(
+            1 for stop in route["stops"] if stop["invoice"] is None
+        )
+        if not exists:
+            writer.set(reference, {
+                "date": route_day.isoformat(),
+                "routeName": route["route_name"],
+                "loadingAt": loading_time,
+                "driverId": driver_id,
+                "driverName": driver.get("name", route["driver"]),
+                "helperId": helper_id,
+                "helperName": helper.get("name", "Não informado") if helper_id else "Não informado",
+                "checkerId": checker_id,
+                "checkerName": checker.get("name", route["checker"]),
+                "memberIds": members,
+                "plannedTotal": planned_total,
+                "invoiceValuesComplete": missing_invoice_count == 0,
+                "invoiceMissingCount": missing_invoice_count,
+                "sourceFile": source_name,
+                "sourceFileHash": source_hash,
+                "importMethod": "google-drive-automatic",
+                "publishedBy": "automatic-import",
+                "publishedAt": firestore.SERVER_TIMESTAMP,
+                "detailsExpireAt": datetime.combine(route_day + timedelta(days=180), time(), tzinfo=timezone.utc),
+                "routeExpiresAt": datetime.combine(route_day + timedelta(days=365), time(), tzinfo=timezone.utc),
+            })
+            created_routes += 1
+        elif not any(stop["invoice"] is not None for stop in route["stops"]):
+            raise ValueError(
+                f"A rota {route['route_name']} de {route_day.isoformat()} já existe. "
+                "Preencha ao menos um Valor da Nota para atualizar os dados fiscais."
+            )
+        else:
+            updated_routes += 1
+            writer.set(reference, {
+                "invoiceValuesComplete": missing_invoice_count == 0,
+                "invoiceMissingCount": missing_invoice_count,
+                "invoiceSourceFile": source_name,
+                "invoiceUpdatedAt": firestore.SERVER_TIMESTAMP,
+            }, merge=True)
         for index_stop, stop in enumerate(route["stops"], start=1):
             stop_id = f"{index_stop:03d}-{slug(stop['name'])}"
             address = f"{stop['street']}, {stop['neighborhood']}, {stop['city']} - {stop['state']}, {stop['cep']}"
-            writer.set(reference.collection("stops").document(stop_id), {
-                "order": stop["order"],
-                "name": stop["name"],
-                "address": address,
-                "street": stop["street"],
-                "neighborhood": stop["neighborhood"],
-                "cep": stop["cep"],
-                "city": stop["city"],
-                "state": stop["state"],
-                "boxes": stop["boxes"],
-                "loadingAt": loading_time,
-            })
+            if not exists:
+                writer.set(reference.collection("stops").document(stop_id), {
+                    "order": stop["order"],
+                    "name": stop["name"],
+                    "address": address,
+                    "street": stop["street"],
+                    "neighborhood": stop["neighborhood"],
+                    "cep": stop["cep"],
+                    "city": stop["city"],
+                    "state": stop["state"],
+                    "boxes": stop["boxes"],
+                    "loadingAt": loading_time,
+                })
             if stop["invoice"] is not None:
                 writer.set(reference.collection("managerData").document(stop_id), {
                     "invoiceValueCents": stop["invoice"],
                     "updatedAt": firestore.SERVER_TIMESTAMP,
-                })
+                    "sourceFile": source_name,
+                }, merge=exists)
+                if exists:
+                    updated_invoices += 1
     writer.finish()
-    return len(prepared), sum(len(item[0]["stops"]) for item in prepared)
+    return created_routes, updated_routes, updated_invoices, sum(
+        len(item[0]["stops"]) for item in prepared if not item[2]
+    )
 
 
 def main():
@@ -343,7 +371,7 @@ def main():
             }, merge=True)
             return
         routes = read_routes(path)
-        route_count, stop_count = publish(
+        route_count, updated_route_count, invoice_count, stop_count = publish(
             db, routes, path.name, digest, config.get("loadingTime", "06:00")
         )
         reference.set({
@@ -352,7 +380,11 @@ def main():
             "lastStatus": "Sucesso",
             "lastFile": path.name,
             "lastFileHash": digest,
-            "lastMessage": f"{route_count} rota(s) e {stop_count} loja(s) importadas.",
+            "lastMessage": (
+                f"{route_count} rota(s) e {stop_count} loja(s) importadas. "
+                f"{updated_route_count} rota(s) existente(s) receberam "
+                f"{invoice_count} valor(es) de nota fiscal."
+            ),
         }, merge=True)
     except Exception as error:
         reference.set({
