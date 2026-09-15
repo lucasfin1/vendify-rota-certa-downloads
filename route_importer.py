@@ -120,7 +120,6 @@ def download_excel(folder_url, expected_name):
             output=str(destination),
             quiet=False,
             use_cookies=False,
-            remaining_ok=True,
         ) or []
     elif file_match:
         output = destination / (expected_name or "rotas.xlsx")
