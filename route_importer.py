@@ -110,18 +110,57 @@ def should_run(config, now):
 
 def download_excel(folder_url, expected_name):
     destination = Path(tempfile.mkdtemp(prefix="vendify-routes-"))
-    downloaded = gdown.download_folder(
-        url=folder_url,
-        output=str(destination),
-        quiet=False,
-        use_cookies=False,
-        remaining_ok=True,
-    ) or []
-    files = [Path(path) for path in downloaded if str(path).lower().endswith(".xlsx")]
+    folder_match = re.search(r"/folders/([a-zA-Z0-9_-]+)", folder_url)
+    file_match = re.search(r"/file/d/([a-zA-Z0-9_-]+)", folder_url)
+    downloaded = []
+    if folder_match:
+        # Usar o ID evita falhas causadas por parâmetros como ?usp=sharing.
+        downloaded = gdown.download_folder(
+            id=folder_match.group(1),
+            output=str(destination),
+            quiet=False,
+            use_cookies=False,
+            remaining_ok=True,
+        ) or []
+    elif file_match:
+        output = destination / (expected_name or "rotas.xlsx")
+        saved = gdown.download(
+            id=file_match.group(1),
+            output=str(output),
+            quiet=False,
+            use_cookies=False,
+            fuzzy=True,
+        )
+        if saved:
+            downloaded = [saved]
+    else:
+        raise ValueError(
+            "O link configurado não é de uma pasta ou arquivo válido do Google Drive."
+        )
+
+    # Algumas versões do Google Drive não devolvem todos os nomes na lista do
+    # gdown, embora os arquivos tenham sido gravados. Por isso também varremos
+    # a pasta temporária, incluindo eventuais subpastas.
+    candidates = {Path(path) for path in downloaded if Path(path).is_file()}
+    candidates.update(path for path in destination.rglob("*") if path.is_file())
+    files = sorted(
+        (path for path in candidates if path.suffix.lower() == ".xlsx"),
+        key=lambda path: path.name.lower(),
+    )
     if expected_name:
-        files = [path for path in files if path.name.lower() == expected_name.lower()]
+        wanted = expected_name.strip().lower()
+        if not wanted.endswith(".xlsx"):
+            wanted += ".xlsx"
+        files = [path for path in files if path.name.lower() == wanted]
     if not files:
-        raise ValueError("Nenhum arquivo Excel .xlsx foi encontrado na pasta compartilhada.")
+        found = ", ".join(sorted(path.name for path in candidates))
+        detail = f" Arquivos encontrados: {found}." if found else ""
+        raise ValueError(
+            "Nenhum arquivo Excel .xlsx foi encontrado. Confirme se o arquivo "
+            "foi enviado como Excel (não como Planilhas Google), se está dentro "
+            "da pasta informada e se a pasta está liberada para qualquer pessoa "
+            f"com o link.{detail}"
+        )
     if len(files) > 1 and not expected_name:
         names = ", ".join(sorted(path.name for path in files))
         raise ValueError(f"Há mais de um Excel na pasta ({names}). Informe o nome no painel web.")
