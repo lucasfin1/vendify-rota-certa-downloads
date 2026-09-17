@@ -2,10 +2,11 @@ name: Importar rotas automaticamente
 
 on:
   schedule:
-    # 21:00 UTC corresponde a 18:00 em America/Sao_Paulo.
-    - cron: "0 21 * * 1-5"
-    # Segunda tentativa caso o GitHub atrase a primeira execução.
-    - cron: "30 21 * * 1-5"
+    # 21:07 UTC corresponde a 18:07 em America/Sao_Paulo.
+    # Evita o início exato da hora, quando o GitHub costuma ter mais filas.
+    - cron: "7 21 * * 1-5"
+    # Segunda tentativa caso o GitHub atrase ou descarte a primeira.
+    - cron: "22 21 * * 1-5"
   workflow_dispatch:
 
 permissions:
