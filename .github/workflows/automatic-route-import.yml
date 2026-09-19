@@ -4,7 +4,7 @@ on:
   schedule:
     # 21:07 UTC corresponde a 18:07 em America/Sao_Paulo.
     # Evita o início exato da hora, quando o GitHub costuma ter mais filas.
-    - cron: "*/15 * * * *"
+    - cron: "3,13,23,33,43,53 * * * *"
     # Segunda tentativa caso o GitHub atrase ou descarte a primeira.
     - cron: "22 21 * * 1-5"
   workflow_dispatch:
